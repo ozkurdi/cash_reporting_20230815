@@ -1,0 +1,936 @@
+---
+title: "Northwest Syria Cash Working Group Earthquake Response Bulletin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_download: yes
+    theme: readable
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+    number_sections: no
+    collapsed: no
+  word_document:
+    toc: yes
+    toc_depth: '4'
+always_allow_html: yes
+---
+
+```{css, echo=FALSE}
+
+#TOC::before {
+  content: "";
+  display: block;
+  height: 70px;
+  margin: 2em 20px 40px 20px;
+  background-image: url("https://github.com/northwest-syria-cash-working-group/multisector_4Ws_review/raw/main/NWS-CWG%20logo.PNG");
+  background-size: contain;
+  background-position: center center;
+  background-repeat: no-repeat;
+}
+```
+
+```{=html}
+<style>
+    body .main-container {
+        max-width: 1280px;
+    }
+</style>
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.width=9, message = FALSE, warning=FALSE)
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(stringi)
+library(janitor)
+library(scales)
+library(viridis)
+library(patchwork)
+library(DT)
+library(here)
+library(sf)
+library(plotly)
+library(flextable)
+library(mdepriv)
+library(ggrepel)
+library(anytime)
+library(tidytext)
+
+theme_set(theme_light())
+
+  # disabling scientific notation
+options(scipen = 100)
+
+`%out%` <- Negate(`%in%`)
+
+  # function for transposing df
+transpose_df <- function(df) {
+  t_df <- data.table::transpose(df)
+    colnames(t_df) <- rownames(df)
+      rownames(t_df) <- colnames(df)
+        t_df <- t_df %>%
+          tibble::rownames_to_column(.data = .) %>%
+            tibble::as_tibble(.)
+  return(t_df)
+}
+
+  # scaling functions 
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+range_wna <- function(x){(x-min(x, na.rm = TRUE))/(max(x, na.rm = TRUE)-min(x, na.rm = TRUE))}
+
+  # mode function 
+mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+locations <- read_csv("./data/locations_aoc.csv")
+
+pcode3_shape <- 
+  st_read("./data/syr_admbnda_uncs_unocha_20201217/syr_admbnda_adm3_uncs_unocha_20201217.shp")
+
+```
+
+
+```{r data}
+
+report_date <- "15 August 2023"
+
+names_eq <- c(
+  "date",
+  "governorate",
+  "district",
+  "sub_district",
+  "community",
+  "admin4pcode",
+  "casualties",
+  "injuries",
+  "completely_destroyed_houses",
+  "damaged_unihabitable_houses",
+  "temporary_accommodation_centres",
+  "idps_in_all_centres",
+  "schools_as_accomodation_centres",
+  "idps_in_schools",
+  "tents_needed",
+  "blankets_mattresses_needed",
+  "temporary_accommodation_centres_available", 
+  "accessible_civil_defense",
+  "latrines_available",
+  "meals_needed_per_day",
+  "need_blood_donations",
+  "health_services_available",
+  "necessary_medical_equipment",
+  "rubble_volunteers",
+  "telecoms_available",
+  "electricity_available", 
+  "heating_fuel_needed"
+)
+
+eq <- read_excel("./data/syria-earthquake-impact-20-march-2023.xlsx",
+                 sheet = "DATASET") %>% 
+  setNames(names_eq) %>% 
+    left_join(locations %>% select(admin4pcode, admin3pcode), 
+            by = c("admin4pcode" = "admin4pcode")) %>% 
+      mutate(wounded_dead = casualties + injuries,
+             damaged_houses = completely_destroyed_houses + damaged_unihabitable_houses) %>% 
+        group_by(admin3pcode) %>% 
+          summarise(wounded_dead = sum(wounded_dead, na.rm = TRUE), 
+          damaged_houses = sum(damaged_houses, na.rm = TRUE)) %>% 
+            left_join(read_excel("./data/2023HNO_PiN_Severity_detailedAoI_FORSHARE 15032023.xlsx", skip = 1, 
+            sheet = 1) %>%
+              clean_names() %>%
+                select(admin3pcode, total_population, aoc = ao_c), 
+                by = "admin3pcode") %>% 
+                  mutate(wounded_dead_100k = wounded_dead / total_population * 100000, 
+                  damaged_houses_100k = damaged_houses / total_population * 100000)
+
+
+eq_mdepriv <- eq %>%
+  mutate_at(vars(wounded_dead, damaged_houses, 
+                 wounded_dead_100k, damaged_houses_100k), ~ range_wna(.)) %>% 
+    mdepriv(c("wounded_dead", "damaged_houses", 
+            "wounded_dead_100k", "damaged_houses_100k"), 
+          method = "cz", output = "all", 
+          score_i_heading = "eq_score")
+
+eq <- eq %>% 
+  left_join(eq_mdepriv$data %>% 
+    select(admin3pcode, eq_score), 
+    by = "admin3pcode")
+
+cbr <- read_csv("./data/cbr_com.csv") %>% 
+        filter(str_detect(cluster, "Multipurpose")) %>% 
+          mutate(month = month(end_date)) %>% 
+            replace_na(list(beneficiaries = 0)) %>% 
+              mutate(governorate = recode(governorate, 
+                                          "aleppo" = "Aleppo", 
+                                          "ALEPPO" = "Aleppo"), 
+                                   district = recode(district, 
+                                   "Jabal Samman" = "Jebel Saman", 
+                                   "azaz" = "A'zaz", 
+                                   "jarablus" = "Jarablus"), 
+                                   sub_district = recode(sub_district, 
+                                   "azaz" = "A'zaz", 
+                                   "jarablus" = "Jarablus"), 
+  # Doing this because Ar-Raqqa has never appeared before
+                                   previously_assisted = ifelse(admin1pcode %in% c("SY11"), 
+                                                                                   "No", 
+                                   previously_assisted)) %>% 
+                                    filter(admin1pcode != "SY09")
+ 
+  
+
+hno <- read_excel("./data/2023HNO_PiN_Severity_detailedAoI_FORSHARE 15032023.xlsx", skip = 1, 
+                  sheet = 1) %>%
+  clean_names()
+
+
+nw_pcode3 <- hno %>% 
+  filter(ao_c == "NW") %>% 
+    pull(admin3pcode)
+
+  # Putting this here, since it's best to make sure that it always runs, when I'm in this document
+sum_stats <- cbr  %>% 
+  filter(project_status == "Completed") %>%
+    summarise(partners = n_distinct(implementing_partner), 
+    communities = n_distinct(admin4pcode), 
+    households = sum(families[previously_assisted == "No"], na.rm = TRUE), 
+    beneficiaries = sum(beneficiaries[previously_assisted == "No"], na.rm = TRUE), 
+    sub_districts = n_distinct(admin3pcode), 
+    total_usd = sum(total_usd, na.rm = TRUE), 
+    .groups = "drop")
+
+```
+
+
+
+<br><br><br>
+
+# 1. MPC response overview
+
+
+As of **`r report_date`**, a total of **`r sum_stats %>% pull(beneficiaries) %>% format(big.mark = ",")`** persons or **`r sum_stats %>% pull(households) %>% format(big.mark = ",")`** families have been reached by MPC interventions. 
+
+A total of USD **`r paste(format(round((sum_stats %>% pull(total_usd)) / 1000000, 1), trim = TRUE), "million")`** has been disbursed by **`r sum_stats %>% pull(partners)`** implementing agencies in **`r sum_stats %>% pull(communities)`** communities across **`r sum_stats %>% pull(sub_districts)`** sub-districts. 
+
+*Only beneficiaries who have received at least USD 100/family/month have been included; excludes sector-based activities such as non-MPC cash-for-food.*
+
+
+<br>
+
+```{r summary-table}
+cbr  %>% 
+  filter(project_status == "Completed") %>%
+    group_by(governorate, district) %>% 
+      summarise(partners = n_distinct(implementing_partner), 
+      communities = n_distinct(admin4pcode), 
+      households = sum(families, na.rm = TRUE), 
+      beneficiaries = sum(beneficiaries[previously_assisted == "No"], na.rm = TRUE), 
+      total_usd = sum(total_usd, na.rm = TRUE), 
+      .groups = "drop") %>% 
+        ungroup() %>% 
+          mutate(`%_BNF` = 
+          round(beneficiaries / sum(beneficiaries, na.rm = TRUE) * 100, digits = 2), 
+          total_usd = round(total_usd)) %>%
+            adorn_totals("row",,,, households, beneficiaries, total_usd, `%_BNF`) %>% 
+              mutate(`%_BNF` = ifelse(`%_BNF` > 99.98, 100, `%_BNF`)) %>% 
+                select(governorate, district, `comm.` = communities, partners, 
+                households, beneficiaries, total_usd, `%_BNF`) %>% 
+                  flextable() %>% 
+                    set_caption(paste0(
+                      round(sum_stats$beneficiaries, digits = -3) %>% format(big.mark = ","),
+                      " people reached with MPC, USD ",
+                      paste(format(round((sum_stats %>% pull(total_usd)) / 1000000, 1), trim = TRUE), "million"), 
+                      " disbursed, ", 
+                      report_date)) %>% 
+                        theme_zebra() %>% 
+  #  footnote(i = 1, j = 6, part = "header", ref_symbols = "a",
+  #           as_paragraph("Beneficiary figures include only reported MPC with a minimum transfer value #of USD 100")) %>% 
+                          footnote(i = 1, j = 8, part = "header", ref_symbols = "1",  
+                          as_paragraph("As percentage of all MPC beneficiaries reached in NW Syria")) %>% 
+                            set_table_properties(layout = "autofit", width = 1)
+
+
+```
+
+```{r summary-table-print, eval=FALSE}
+cbr  %>% 
+  filter(project_status == "Completed") %>%
+    group_by(governorate, district) %>% 
+      summarise(partners = n_distinct(implementing_partner), 
+      communities = n_distinct(admin4pcode), 
+      households = sum(families, na.rm = TRUE), 
+      beneficiaries = sum(beneficiaries[previously_assisted == "No"], na.rm = TRUE), 
+      total_usd = sum(total_usd, na.rm = TRUE), 
+      .groups = "drop") %>% 
+        ungroup() %>% 
+          mutate(`%_BNF` = 
+           round(beneficiaries / sum(beneficiaries, na.rm = TRUE) * 100, digits = 2), 
+           total_usd = round(total_usd)) %>%
+            adorn_totals("row",,,, households, beneficiaries, total_usd, `%_BNF`) %>% 
+              mutate(`%_BNF` = ifelse(`%_BNF` > 99.98, 100, `%_BNF`)) %>% 
+                select(governorate, district, `comm.` = communities, partners, 
+                households, beneficiaries, total_usd, `%_BNF`) %>% 
+                  flextable() %>% 
+                    set_caption(paste0(
+                    round(sum_stats$beneficiaries, digits = -3) %>% format(big.mark = ","),
+                    " people reached with MPC, USD ",
+                    paste(format(round((sum_stats %>% pull(total_usd)) / 1000000, 1), trim = TRUE), "million"), 
+                    " disbursed, ", 
+                    report_date)) %>% 
+                      theme_zebra() %>% 
+  #  footnote(i = 1, j = 6, part = "header", ref_symbols = "a",
+  #  as_paragraph("Beneficiary figures include only reported MPC with a minimum transfer value #of USD 100")) %>% 
+                        footnote(i = 1, j = 8, part = "header", ref_symbols = "1",  
+                        as_paragraph("As percentage of all MPC beneficiaries reached in NW Syria")) %>% 
+                          set_table_properties(layout = "autofit", width = 1) %>% 
+                            save_as_image(path = "./img/summary_table.png")
+```
+
+
+
+<br>
+
+In February 2023, `r filter(cbr, month == 2 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")` beneficiary frequencies were reached, and in March 2023 the number increased to `r filter(cbr, month == 3 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")`. In April 2023 `r filter(cbr, month == 4 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")` were reached. As of May 2023, `r filter(cbr, month == 5 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")` beneficiaries have been reached, followed by `r filter(cbr, month == 6 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")` in June, with `r filter(cbr, month == 7 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")` in July 2023 and `r filter(cbr, month == 8 & project_status == "Completed") %>% {sum(.$beneficiaries, na.rm = TRUE)} %>% format(big.mark = ",")` in August 2023.
+
+
+
+*This document distinguishes between beneficiaries, or unique individuals reached, and beneficiary frequencies, or the number of times people have been reached, inclusive of double counting.*
+
+  
+```{r eval=FALSE}
+cbr %>% 
+  mutate(end_date = as.Date(end_date)) %>% 
+    filter(end_date == "0022-01-20") %>% 
+      {sum(.$beneficiaries, na.rm = TRUE)}
+
+```
+
+
+<br><br>
+
+## 1.1 Progress by date
+
+
+```{r progress-line, fig.height=6}
+  # This is the messiest chunk in the whole document. Can you please fix it? 
+
+progress_max_date <- "2023-08-15"
+
+progress_line <- cbr %>%
+  filter(!is.na(end_date)) %>% 
+    mutate(end_date = anydate(end_date)) %>% 
+      filter(project_status == "Completed" & 
+        previously_assisted == "No") %>% 
+          group_by(end_date) %>% 
+            summarise(beneficiaries = sum(beneficiaries)) %>%
+              arrange(end_date) %>% 
+                filter(end_date  > "2022-12-30" & end_date < progress_max_date) %>%  
+  # Run chunk up to here to check when the last distribution was in the data set 
+                  mutate(cum_ben = cumsum(beneficiaries)) %>% 
+  # Spaced at roughly every 15 days, Although some days do not have distributions 
+                    mutate(cum_label = ifelse(end_date == "2023-02-10"| 
+                                              end_date == "2023-03-01"|
+                                              end_date == "2023-03-15"|
+                                              end_date == "2023-03-30"|
+                                              end_date == "2023-04-15"|
+                                              end_date == "2023-04-30"|
+                                              end_date == "2023-05-24"|
+                                              end_date == "2023-06-11"|
+                                              end_date == "2023-06-30"|
+                                              end_date == "2023-07-17"|
+                                              end_date == "2023-07-31"|
+                                              end_date == "2023-08-15",
+                                              cum_ben, ""), 
+                                              cum_label = as.numeric(cum_label), 
+                                              end_date = anydate(end_date)) 
+
+progress_line %>% 
+  ggplot(aes(x = end_date, y = cum_ben)) + 
+  geom_line(colour = "blue") + 
+  geom_text(aes(label = scales::comma(cum_label)), vjust = -1, 
+            size = 4) + 
+  # Scale this down to "1 month" when the axis gets too crowded, Then you can just leave the date_label as "%b"
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  scale_y_continuous(labels = comma, expand = expansion(mult = .1)) + 
+  labs(x = "Distribution date", 
+       y = "Cumulative beneficiaries", 
+       title = "MPC progress by date", 
+  # We can probably alter the subtitle sooner or later, since earthquake reporting is becoming less and less important 
+       subtitle = paste0("The earliest earthquake-related distribution was 09 Feb 2023\nExcludes ", 
+                          format(sum_stats %>% pull(beneficiaries) - 
+                           max(progress_line$cum_label, na.rm = TRUE), big.mark = ","), 
+                         " beneficiaries for which activity end date was after ", 
+                         report_date))
+         
+ggsave("./img/progress_line.png", dpi = 300, height = 8.27, width = 11.69, units = "in")  
+```
+
+<br>
+
+The small number of beneficiaries reached earlier than February all pertained to the HRP, the only such beneficiaries reported so far. The CWG would like to encourage partners to report on their January achievements.
+
+<br><br>
+
+# 2. Map of activities
+
+<br>
+
+
+
+```{r plotly-planned-implemented-map, fig.height=7}
+
+planned_implemented_map <- cbr %>% 
+  # There really was only one partner that reported 
+  # ongoing activities. This should change in the future. 
+  # Most of the activities were largely one-off. 
+  # Or consider using the dates to indicate which activities were ongoing
+  mutate(project_status = recode(project_status, 
+                                 "Ongoing" = "Completed")) %>% 
+    right_join(pcode3_shape, 
+    by = c("admin3pcode" = "ADM3_PCODE")) %>% 
+      filter(ADM1_PCODE %in% c("SY02", "SY07", "SY11") & !is.na(beneficiaries)) %>% 
+        st_as_sf() %>%
+          ggplot() + 
+          geom_sf(size = .1, colour = "grey70") + 
+          geom_point(aes(size = beneficiaries,
+                 colour = project_status, 
+                 x = longitude_x, y = latitude_y, 
+                 text = paste0("sub_district: ", sub_district, "\n",
+                               "community: ", community, "\n",
+                               "location_type: ", village_camps, "\n",
+                               "beneficiaries:", format(beneficiaries, big.mark = ","), "\n",
+                               "partner: ", abbreviation, "\n", 
+                               "lon_x: ", longitude_x, "\n",
+                               "lat_y: ", latitude_y)), 
+                                shape = 21, stroke = .35, 
+                                alpha = .5) + 
+                                scale_size_continuous(labels = comma) + 
+                                scale_colour_viridis_d(na.translate = FALSE) + 
+                                theme_void() + 
+                                theme(plot.background = element_rect(fill = "white", colour = NA), 
+                                plot.caption = element_text(hjust = 0.5),) +
+                                labs(title = "Communities reached and planned -- CWG partners", 
+                                subtitle = "Planned in yellow, completed in purple, size shows number of persons", 
+                                colour = "Status") +
+                                guides(size = "none")
+
+  
+ggplotly(planned_implemented_map, tooltip = c("text")) %>% 
+  plotly::style(hoveron = "point") %>% 
+    layout(title = list(text = paste0("Communities reached and planned -- CWG partners", 
+                                  "<br>", 
+                                  "<sup>", 
+                                  "Planned in green, completed in purple, size shows number of persons; click and drag to zoom; mouse over for details")))
+  
+```
+
+<br><br><br>
+
+# 3. Geographic breakdown of beneficiaries
+
+Coverage continues to be highest in Afrin and Harim districts, where the highest numbers of damaged houses and wounded people are located (though these areas do not necessarily have the highest proportions of damage). 
+
+<br>
+
+
+```{r mpc-by-district, warning = FALSE}
+cbr %>% 
+  filter(project_status == "Completed" & 
+         previously_assisted == "No") %>% 
+          group_by(governorate, district) %>% 
+            summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE)) %>% 
+              mutate(district = fct_reorder(district, beneficiaries),
+              governorate = fct_relevel(governorate, 
+              c("Idleb", "Ar-Raqqa", "Aleppo"))
+               ) %>% 
+                ggplot(aes(x = beneficiaries, y = district)) + 
+                geom_col(aes(fill = governorate)) + 
+                geom_text(aes(label = comma(beneficiaries)), 
+                hjust = "inward") + 
+                scale_fill_viridis_d(begin = .3) + 
+                labs(title = "MPC beneficiaries by district", 
+                subtitle = paste0("as of ", report_date), 
+                y = "") + 
+                scale_x_continuous(labels = unit_format(unit = "K", scale = 1e-3, accuracy = 1)) + 
+                hno %>% 
+                  filter(admin2name_en %in% c("Harim", "Idleb", "Jisr-Ash-Shugur", "Ariha", 
+                                              "Tell Abiad",  
+                                              "Afrin", "Jebel Saman", "A'zaz", "Jarablus", "Al Bab")) %>% 
+                                                group_by(governorate = admin1name_en, district = admin2name_en) %>% 
+                                                  summarise(total_population = sum(total_population, na.rm = TRUE), 
+                                                  .groups = "drop") %>% 
+                                                    left_join(
+                                                    cbr %>%
+                                                      filter(project_status == "Completed" &  
+                                                        previously_assisted == "No") %>%  
+                                                          group_by(district) %>% 
+                                                            summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE)) ,  
+                                                              by = "district") %>% 
+  # Kind of irritating that you're doing this manually 
+                                                                mutate(district = fct_relevel(district, 
+                                                                "Al Bab", 
+                                                                "Jarablus", 
+                                                                "A'zaz", 
+                                                                "Jebel Saman", 
+                                                                "Afrin", 
+                                                                "Tell Abiad",
+                                                                "Ariha", 
+                                                                "Jisr-Ash-Shugur", 
+                                                                "Idleb", 
+                                                                "Harim"),
+                                                                pc_reached = round(beneficiaries / total_population * 100, digits = 1)) %>% 
+                                                                  ggplot(aes(x = pc_reached, y = district)) +
+                                                                  geom_col(aes(fill = governorate)) + 
+                                                                  geom_text(aes(label = comma(pc_reached)), 
+                                                                  hjust = "inward") +
+                                                                  scale_fill_viridis_d(begin = .3) + 
+                                                                  labs(title = "Percent of population reached", 
+                                                                  subtitle = paste0("as of ", report_date), 
+                                                                  y = "", 
+                                                                  x = "% of population reached") +
+                                                                  plot_layout(guides = "collect") & 
+                                                                  theme(legend.position = "bottom")
+                                                                ggsave("./img/mpc_by_district.png", dpi = 300, height = 8.27, width = 11.69, units = "in")  
+
+```
+
+<br>
+
+```{r table-eq-damage}
+eq %>% 
+  left_join(hno %>% 
+    select(governorate = admin1name_en, 
+    district = admin2name_en, 
+    sub_district = admin3name_en, 
+    admin3pcode), 
+    by = "admin3pcode") %>% 
+      filter(admin3pcode %in% nw_pcode3 & 
+      district %in% c("Harim", "Idleb", "Jisr-Ash-Shugur", "Ariha", 
+                      "Tell Abiad",  
+                      "Afrin", "Jebel Saman", "A'zaz", "Jarablus", "Al Bab")) %>% 
+        group_by(governorate, district) %>% 
+          summarise(wounded_dead = sum(wounded_dead, na.rm = TRUE), 
+          damaged_houses = sum(damaged_houses, na.rm = TRUE)) %>% 
+  # Where is Ariha, and why is it showing up here
+            filter(district != "Ariha") %>% 
+              left_join(hno %>% 
+                filter(admin3pcode %in% nw_pcode3 &
+                admin2name_en %in% c("Harim", "Idleb", "Jisr-Ash-Shugur", "Ariha",
+                                     "Tell Abiad",  
+                                     "Afrin", "Jebel Saman", "A'zaz", "Jarablus", "Al Bab")) %>%
+                  group_by(district = admin2name_en) %>%
+                    summarise(population = sum(total_population, na.rm = TRUE)), by = "district") %>% 
+                      mutate(wounded_dead_100k = round(wounded_dead / population * 100000, digits = 2), 
+                        damaged_houses_100k = round(damaged_houses / population * 100000, digits = 2)) %>% 
+                          select(governorate, district, wounded_dead, wounded_dead_100k, 
+                          damaged_houses, damaged_houses_100k) %>% 
+                            flextable() %>% 
+                              theme_zebra() %>% 
+                                set_table_properties(layout = "autofit", width = .99) %>% 
+                                  set_caption("Casualties and damaged houses, absolute figures and per 100,000 persons") %>% 
+                                    footnote(part = "header", i = 1, j = 3:6, inline = TRUE, ref_symbols = "1",
+                                    value = as_paragraph("Data from the Assistance Coordination Unit, Syria 20230328"))
+```
+
+<br>
+
+Below is a breakdown of beneficiaries based on whether they originate from camps or villages. The majority of MPC beneficiaries are from villages.  
+
+<br>
+
+```{r table-camps-villages}
+cbr %>% 
+  filter(project_status == "Completed" & previously_assisted == "No") %>% 
+    mutate(village_camps = ifelse(village_camps %in% c("camp", "village") | is.na(village_camps), 
+                                  village_camps, 
+                                  "camp")) %>% 
+      group_by(village_camps) %>% 
+        summarise(beneficiaries = sum(beneficiaries)) %>% 
+          replace_na(list(village_camps = "NA")) %>% 
+            mutate(`%_beneficiaries` = round(beneficiaries / sum(beneficiaries) * 100, digits = 2)) %>% 
+              flextable() %>% 
+                set_caption("More than twice as many beneficiaries from villages as from camps") %>% 
+                  theme_zebra() %>%
+                    set_table_properties(layout = "autofit", width = .6)
+  
+```
+
+
+<br><br><br>
+
+### 3.1 By sub-district
+
+```{r df-pc-reached}
+avg_pc_reached <- cbr %>% 
+  mutate(sub_district = recode(sub_district, 
+                               "salqin" = "Salqin", 
+                               "afrin" = "Afrin")) %>%
+    filter(project_status == "Completed" & 
+           previously_assisted == "No") %>%
+      filter(!is.na(admin3pcode)) %>% 
+        group_by(sub_district, admin3pcode, governorate) %>%
+          summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE),
+          .groups = "drop") %>% 
+            left_join(hno %>% 
+              filter(admin2name_en %in% c("Harim", "Idleb", "Jisr-Ash-Shugur", "Ariha", 
+                              "Tell Abiad", 
+                              "Afrin", "Jebel Saman", "A'zaz", "Jarablus", "Al Bab")) %>%
+                group_by(admin1name_en, admin3pcode) %>%
+                  summarise(total_population = sum(total_population, na.rm = TRUE),
+                            .groups = "drop"), 
+                            by = "admin3pcode") %>% 
+                              summarise(total_population = sum(total_population, na.rm = TRUE), 
+                              beneficiaries = sum(beneficiaries, na.rm = TRUE)) %>%
+                                mutate(avg_pc_reached = round(beneficiaries / total_population * 100, digits = 2)) %>% 
+                                  pull(avg_pc_reached)
+```
+
+
+The plots below show the breakdown of beneficiaries by sub-district. Caution must be taken to ensure that allocations are fair across the affected areas: there are numerous sub-districts where a very large proportion of the total population has already been reached by multipurpose cash, in particular, Jandairis, Harim, Salqin and Sharan. 
+
+Response activities must be proportional with the magnitude and severity of earthquake damage. Over allocation deprives affected persons of the aid they are due. 
+
+The average percentage of the population reached, of all sub-districts, is `r avg_pc_reached`%. 
+
+<br>
+
+```{r df-sub-district-order}
+sub_district_order <- cbr %>% 
+  filter(project_status == "Completed" &  
+         previously_assisted == "No") %>% 
+    filter(!is.na(admin3pcode)) %>% 
+      mutate(sub_district = recode(sub_district, 
+                                   "salqin" = "Salqin", 
+                                   "afrin" = "Afrin")) %>% 
+        group_by(governorate, sub_district) %>% 
+          summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE), 
+                    .groups = "drop") %>% 
+            arrange(desc(beneficiaries)) %>% 
+              arrange(desc(governorate)) %>% 
+                pull(sub_district)
+```
+
+
+
+```{r mpc-by-sub-district, fig.height=8}
+
+cbr %>% 
+  filter(project_status == "Completed" & 
+         previously_assisted == "No") %>% 
+    filter(!is.na(admin3pcode)) %>% 
+      mutate(sub_district = recode(sub_district, 
+                                   "salqin" = "Salqin", 
+                                   "afrin" = "Afrin")) %>% 
+        group_by(governorate, sub_district) %>% 
+          summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE), 
+                    .groups = "drop") %>% 
+            ungroup() %>% 
+              mutate(sub_district = factor(sub_district,  sub_district_order), 
+              sub_district = fct_rev(sub_district)) %>% 
+                arrange(sub_district) %>% 
+                  ggplot(aes(x = beneficiaries, y = sub_district)) + 
+                  geom_col(aes(fill = governorate)) + 
+                  geom_text(aes(label = comma(beneficiaries)), 
+                  hjust = "inward") + 
+                  scale_fill_viridis_d(begin = .3) + 
+                  labs(title = "MPC beneficiaries by sub-district", 
+                  subtitle = paste0("as of ", report_date), 
+                  y = "") + 
+                  scale_x_continuous(labels = comma) + 
+                  
+cbr %>% 
+  mutate(sub_district = recode(sub_district, 
+         "salqin" = "Salqin", 
+         "afrin" = "Afrin")) %>%
+    filter(project_status == "Completed" &  
+    previously_assisted == "No") %>%
+      filter(!is.na(admin3pcode)) %>% 
+        group_by(sub_district, admin3pcode, governorate) %>%
+          summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE),
+                                        .groups = "drop") %>% 
+            left_join(hno %>% 
+              filter(admin2name_en %in% c("Harim", "Idleb", "Jisr-Ash-Shugur", "Ariha", 
+                                          "Tell Abiad",  
+                                          "Afrin", "Jebel Saman", "A'zaz", "Jarablus", "Al Bab")) %>%
+                group_by(admin1name_en, admin3pcode) %>%
+                  summarise(total_population = sum(total_population, na.rm = TRUE),
+                                                   .groups = "drop"), 
+                                                   by = "admin3pcode") %>% 
+                    mutate(pc_reached = round(beneficiaries / total_population * 100, digits = 1)) %>% 
+                      mutate(sub_district = factor(sub_district,  sub_district_order), 
+                             sub_district = fct_rev(sub_district)) %>% 
+                        arrange(sub_district) %>%  
+                          ggplot(aes(x = pc_reached, y = sub_district)) +
+                          geom_col(aes(fill = governorate)) + 
+                          geom_text(aes(label = comma(pc_reached)), 
+                          hjust = "inward") +
+                          scale_fill_viridis_d(begin = .3) + 
+                          labs(title = "Percent of population reached", 
+                          subtitle = paste0("as of ", report_date), 
+                          y = "", 
+                          x = "% of population reached") +
+                          plot_layout(guides = "collect") & 
+                          theme(legend.position = "bottom")
+
+ggsave("./img/mpc_by_sub_district.png", dpi = 300, height = 8.27, width = 11.69, units = "in")  
+```
+
+<br><br>
+
+
+
+<br><br>
+
+
+### 3.2 Planned activities 
+
+Whilst it is heartening to see new sub-districts, the majority of planned allocations have been accorded to areas that have already received relatively high levels of support.  
+
+<br> 
+
+```{r planned-sub-district}
+cbr %>% 
+  filter(project_status == "Planned") %>%
+    filter(governorate == "Aleppo") %>%  
+      group_by(sub_district) %>% 
+        summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE)) %>% 
+          filter(beneficiaries > 0) %>% 
+            ggplot(aes(x = beneficiaries, y = fct_reorder(sub_district, beneficiaries))) + 
+            geom_col(fill = "#41b6c4") +
+            geom_text(aes(label = comma(beneficiaries)), hjust = "inward") +
+            scale_x_continuous(labels = unit_format(unit = "K", scale = 1e-3, accuracy = 1)) + 
+            labs(title = "Planned beneficiaries -- Aleppo", 
+            x = "Planned beneficiaries", 
+            y = "") + 
+
+cbr %>% 
+  filter(project_status == "Planned") %>%
+    filter(governorate == "Idleb" & !is.na(admin3pcode)) %>%  
+      group_by(sub_district) %>% 
+        summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE)) %>% 
+          filter(beneficiaries > 0) %>% 
+            ggplot(aes(x = beneficiaries, y = fct_reorder(sub_district, beneficiaries))) + 
+            geom_col(fill = "lightgoldenrod") +
+            geom_text(aes(label = comma(beneficiaries)), hjust = "inward") +
+            scale_x_continuous(labels = unit_format(unit = "K", scale = 1e-3, accuracy = 1)) + 
+            labs(title = "Planned beneficiaries -- Idleb", 
+            x = "Planned beneficiaries", 
+            y = "")  + 
+
+plot_layout(widths = c(1.15, 1))
+
+ggsave("./img/planned_by_sub_district.png", dpi = 300, height = 8.27, width = 11.69, units = "in")
+
+```
+
+<br>
+
+
+
+<br><br><br>
+
+# 4. Cash response actors and cash disbursed
+
+
+USD **`r paste(round(cbr %>% filter(project_status == "Completed") %>% {sum(.$total_usd, na.rm = TRUE)} / 1000000, digits = 1), "million")`** has been distributed across **`r cbr %>% filter(project_status == "Completed") %>% {n_distinct(.$admin4pcode)}`** communities and **`r cbr %>% filter(project_status == "Completed") %>% {n_distinct(.$admin3pcode)}`** sub-districts in NW Syria.
+
+<br>
+
+```{r table-partners-reach}
+cbr %>% 
+  filter(project_status == "Completed") %>% 
+    group_by(implementing_partner) %>% 
+      summarise(beneficiary_freq = sum(beneficiaries, na.rm = TRUE), 
+      districts = n_distinct(admin2pcode), 
+      communities = n_distinct(admin4pcode)) %>% 
+        arrange(desc(beneficiary_freq)) %>% 
+          flextable() %>% 
+            set_caption("Reach and footprint of cash response actors") %>% 
+              theme_zebra() %>% 
+                set_table_properties(layout = "autofit", width = .99) %>% 
+                  footnote(as_paragraph("Only partners who provided more than USD 100/family/month"), 
+                           i = 1, j = 1, part = "header", inline = TRUE, ref_symbols = "1")
+  
+```
+
+<br>
+
+In the scatter plot below, each point is a single cash working group partner. The x-axis indicates the number of beneficiary frequencies reached per agency and the y-axis indicates the number of communities (admin4) reached. Mouse over each point for more details.
+
+<br>
+
+
+
+```{r partner-scatter-plotly}
+partner_scatter <- cbr %>% 
+  filter(project_status == "Completed") %>% 
+    group_by(implementing_partner) %>% 
+      summarise(beneficiaries = sum(beneficiaries, na.rm = TRUE), 
+      communities = n_distinct(admin4pcode)) %>% 
+        ggplot(aes(x = beneficiaries, y = communities)) +
+          geom_point(aes(size = beneficiaries, 
+          text = paste0(implementing_partner, "\n", 
+          "beneficiary_freq: ", format(beneficiaries, big.mark = ","), "\n", 
+          "communities: ", communities))) + 
+          scale_x_log10(labels = comma) + 
+          theme(legend.position = "none") + 
+          labs(x = "Beneficiary frequencies reached", 
+          y = "Communities (admin4) reached", 
+          title = "Implementing partners -- beneficiary frequencies and communities reached")
+
+ggplotly(partner_scatter, tooltip = c("text")) %>% 
+  layout(showlegend = TRUE, legend = list(font = (list(size = 6)))) %>% 
+    plotly::style(hoveron = "point") %>% 
+      layout(title = list(text = paste0("Beneficiaries and communities reached",
+                                        "<br>",
+                                        "<sup>",
+                                        "Cash response implementing partners; mouse over for details","</sup>")))
+
+
+```
+
+
+
+<br><br><br>
+
+### 4.1 Cash disbursed per partner
+
+<br>
+
+```{r table-cash-disbursed}
+cbr %>% 
+  filter(project_status == "Completed") %>% 
+    group_by(implementing_partner) %>% 
+      summarise(total_usd = sum(total_usd, na.rm = TRUE), 
+      families = sum(families, na.rm = TRUE)) %>% 
+        mutate(usd_per_fam = round(total_usd / families, digits = 2), 
+        `%_usd_total` = round(total_usd / sum(total_usd) * 100, 
+                              digits = 2), 
+         total_usd = round(total_usd)) %>% 
+          arrange(desc(total_usd)) %>% 
+            flextable() %>% 
+              set_caption("Cash disbursed and families reached by partner") %>% 
+                theme_zebra() %>% 
+                  flextable::set_table_properties(layout = "autofit", width = .99)
+```
+
+<br>
+
+The CWG is currently working with other Clusters to consolidate all cash-based activities and will soon be able to provide more comprehensive reporting. 
+
+<br><br> 
+
+### 4.2 Currency disbursed
+
+```{r df-currency-table}
+currency_table <- cbr %>% 
+  filter(project_status == "Completed") %>% 
+    group_by(currency) %>% 
+      summarise(total_usd = sum(total_usd, na.rm = TRUE)) %>%
+  # doing this entirely for rounding reasons, because of FX stuff, there's one extra dollar
+        mutate(total_usd = ifelse(currency == "USD", total_usd - 1, total_usd)) %>% 
+          mutate(pc_total = round(total_usd / sum(total_usd) * 100, 
+                                  digits = 2))
+```
+
+
+A total of **`r filter(currency_table, currency == "USD") %>% pull(pc_total)`%** of cash disbursed was in USD. 
+
+<br>
+
+
+```{r table-currency-table}
+currency_table %>% 
+  rename(`%_of_total` = pc_total) %>% 
+    adorn_totals("row") %>% 
+      flextable() %>% 
+        theme_zebra() %>% 
+          set_caption("Proportion of cash disbursed by currency") %>% 
+            set_table_properties(layout = "autofit", width = .6)
+```
+
+
+
+
+<br><br><br>
+
+# 5. Annexes
+
+<br>
+
+### 5.1 Interactive reference table at sub-district level
+
+Columns include: 
+`governorate`, `district`, `sub-district`, 
+`total population`, `beneficiaries`, `total usd disbursed`, 
+`wounded and dead`, `wounded and dead per 100k`, 
+`damaged houses`, `damaged houses per 100k`, 
+`admin3pcode`
+
+<br>
+
+```{r DT-admin3}
+eq %>% 
+  left_join(locations %>% 
+    distinct(admin3pcode, 
+    sub_district = admin3name_en,
+    district = admin2name_en,
+    governorate = admin1name_en), 
+    by = "admin3pcode") %>% 
+      left_join(cbr %>% 
+        filter(project_status == "Completed") %>% 
+          group_by(admin3pcode) %>% 
+            summarise(beneficiaries = sum(beneficiaries[previously_assisted == "No"], 
+                                          na.rm = TRUE), 
+            total_usd = sum(total_usd, na.rm = TRUE)), 
+            by = "admin3pcode") %>% 
+              select(governorate, district, sub_district, 
+                     total_population, 
+                     beneficiaries, total_usd, 
+                     wounded_dead, wounded_dead_100k, 
+                     damaged_houses, damaged_houses_100k, 
+                     admin3pcode) %>% 
+                datatable(options = list(pageLength = 10, scrollX = TRUE), 
+                filter = list(position = "top", clear = FALSE),
+                caption = htmltools::tags$caption(style = 'caption-side: top; 
+                                                  text-align: center; font-size:120% ;',
+                                                  "Reference table -- Earthquake impacts, from ACU, extracted 20230328")) %>% 
+                  formatStyle(0, target = "row", lineHeight = "80%", fontSize = "80%") %>% 
+                    formatRound(c("wounded_dead_100k", "damaged_houses_100k"), digits = 2) %>% 
+                      formatCurrency(c("total_population", 
+                                       "wounded_dead", "damaged_houses", 
+                                       "beneficiaries", "total_usd"), 
+                      currency = "", interval = 3, mark = ",") %>%
+                        formatRound(c("total_population", 
+                                      "wounded_dead", "damaged_houses",
+                                      "beneficiaries", "total_usd"), digits = 0)
+  
+```
+
+<br><br>
+
+### 5.2 Reporting quality
+
+```{r}
+month_reporting <- cbr %>% 
+  group_by(month = month(end_date)) %>% 
+    summarise(partners = n_distinct(implementing_partner))
+```
+
+
+This section documents issues encountered in the cleaning of 4W and FSL data and their impacts on the quality of reporting the CWG can provide. The recommendations by the CWG are included to enhance reporting quality: 
+
+1. The CWG has adopted a new 4Ws template for monthly reporting, aiming to improve the documentation of the earthquake response efforts. **The reporting deadline is set on the 15th of each month.** In February `r filter(month_reporting, month == 2) %>% pull(partners)` partners reported their achievements, In March `r filter(month_reporting, month == 3) %>% pull(partners)` partners have reported their achievements, with `r filter(month_reporting, month == 4) %>% pull(partners)` partners having reported in April, in May `r filter(month_reporting, month == 5) %>% pull(partners)` partners have reported. `r filter(month_reporting, month == 6) %>% pull(partners)` partners have reported in June, with `r filter(month_reporting, month == 7) %>% pull(partners)` partners have reported in July, and `r filter(month_reporting, month == 8) %>% pull(partners)` reported in August. If no MPC activities were implemented, please inform the CWG as well.
+
+2. For this reporting period, activities pertaining to `r format(sum_stats %>% pull(beneficiaries) - max(progress_line$cum_label, na.rm = TRUE), big.mark = ",")` beneficiaries were missing their dates or had dates in unreadable formats. **Please ensure that the `start date` and `end date` are entered in the format (mm/dd/yyyy) and select the `month of reporting` from the options in the drop down menu.**
+
+3. For sex-and-age dis-aggregations, please do not back fill these columns using calculations based on the census or the MSNA. If no dis-aggregated data is available to your organisation, please leave these columns blank. 
+
+4. The Cash Working Group is currently only collecting planned and implemented **Multipurpose Cash** achievements. Whilst the CWG welcomes additional inputs on other CVA activities, we also want to ensure that the reporting load is as low as possible for partners i.e. if an agency has implemented Cash-for-Work, this should be reported to the ERL Cluster. The CWG will work with all Clusters to develop a consolidated picture of response-wide CVA interventions. 
+
+5. Please indicate in the `previously_assisted` column whether or not beneficiaries have been reached before. However, if the beneficiaries are being reported for the first time to the Cash Working Group, even if you have reached them before, please indicate `No` in this column. This column is used calculate to the number of unique individuals reached. 
